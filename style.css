@@ -1606,6 +1606,12 @@ body.reduce-motion * { animation-duration: 0.01ms !important; transition-duratio
     transform: translateY(-1px);
 }
 
+.msg-action-icon-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+    pointer-events: none;
+}
+
 .msg-action-icon-btn.thumb-up.active {
     background: rgba(16, 185, 129, 0.15);
     border-color: var(--accent-green);

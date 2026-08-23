@@ -185,17 +185,35 @@ const googleProvider = new GoogleAuthProvider();
 /**
  * Trigger anonymous sign-in if not already authenticated.
  * Safe to call multiple times — idempotent.
- * @returns {Promise<User>}
+ *
+ * If anonymous auth fails (rare — some in-app browsers / private mode
+ * block it), the app silently falls back to a local-only guest ID
+ * (see getCurrentUserId) that never syncs across devices or survives
+ * a cache clear. That fallback used to only log a console.warn, so the
+ * user had no way to know their history had quietly detached from a
+ * "real" account. This now reports that state back to the caller so
+ * the UI can warn the user instead of failing invisibly.
+ *
+ * @returns {Promise<{user: User|null, usingLocalGuestId: boolean}>}
  */
 export async function initAuth() {
-    if (auth.currentUser) return auth.currentUser;
+    if (auth.currentUser) return { user: auth.currentUser, usingLocalGuestId: false };
     try {
         const credential = await signInAnonymously(auth);
-        return credential.user;
+        return { user: credential.user, usingLocalGuestId: false };
     } catch (e) {
-        console.warn("⚠️ Anonymous auth failed:", e.message);
-        return null;
+        console.warn("⚠️ Anonymous auth failed, falling back to local guest ID:", e.message);
+        return { user: null, usingLocalGuestId: true };
     }
+}
+
+/**
+ * Whether the current session is running on the local-only guest ID
+ * fallback (i.e. Firebase anonymous auth never succeeded this session).
+ * Safe to call any time after initAuth() has resolved at least once.
+ */
+export function isUsingLocalGuestId() {
+    return !auth.currentUser && !!localStorage.getItem("shanu_guest_id");
 }
 
 /**

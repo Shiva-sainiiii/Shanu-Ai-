@@ -102,6 +102,7 @@ let selectedFiles   = [];      // [{ file: File, status: string }]
 let isRecording     = false;
 let recognition     = null;
 let toastTimer      = null;
+let voiceAutoSendTimer = null;   // pending auto-send after dictation ends — cancellable
 let lastPreviewHTML = "";
 
 // Bloom Mode state — mirrors bloom.html's generator options
@@ -418,6 +419,9 @@ function resizeInput() {
     scrollToBottom();
 }
 inputBox.addEventListener("input", resizeInput);
+// Manual edits after voice dictation cancel the pending auto-send — the
+// stale-text check in recognition.onend's timeout is a second safety net.
+inputBox.addEventListener("input", () => { if (voiceAutoSendTimer) clearTimeout(voiceAutoSendTimer); });
 
 // ── Enter-to-send is a DESKTOP convention (Shift+Enter = newline). On
 //    mobile there is no physical Shift key, so e.shiftKey is always
@@ -619,9 +623,26 @@ async function addMessage(text, type = "bot", actionMode = "live") {
 
         const thumbUpBtn   = actionBar.querySelector(".thumb-up");
         const thumbDownBtn = actionBar.querySelector(".thumb-down");
+
+        // Rapid-clicking both buttons in succession (or double-tapping one
+        // on mobile) could fire two Firestore writes — "up" immediately
+        // followed by "down" — before the first toggle visually settled.
+        // A short shared debounce disables both right after any click.
+        let feedbackDebounceTimer = null;
+        function debounceFeedbackButtons() {
+            thumbUpBtn.disabled = true;
+            thumbDownBtn.disabled = true;
+            clearTimeout(feedbackDebounceTimer);
+            feedbackDebounceTimer = setTimeout(() => {
+                thumbUpBtn.disabled = false;
+                thumbDownBtn.disabled = false;
+            }, 400);
+        }
+
         thumbUpBtn.addEventListener("click", () => {
             const isActive = thumbUpBtn.classList.toggle("active");
             thumbDownBtn.classList.remove("active");
+            debounceFeedbackButtons();
             if (isActive) {
                 logFeedback(getActiveChatId(), displayText, "up");
                 showToast("👍 Thanks for the feedback!");
@@ -630,6 +651,7 @@ async function addMessage(text, type = "bot", actionMode = "live") {
         thumbDownBtn.addEventListener("click", () => {
             const isActive = thumbDownBtn.classList.toggle("active");
             thumbUpBtn.classList.remove("active");
+            debounceFeedbackButtons();
             if (isActive) {
                 logFeedback(getActiveChatId(), displayText, "down");
                 showToast("👎 Thanks — noted for improvement");
@@ -849,8 +871,30 @@ function addFileBubbles() {
 //                        refresh). Instead show a card the user can tap
 //                        to regenerate/reopen on demand.
 // ------------------------------------------
+// ── Unclosed-tag guard ──
+//    match(/\[PDF\]([\s\S]*?)\[\/PDF\]/i) only fires when BOTH the opening
+//    and closing tag are present. A smaller/free model occasionally
+//    truncates generation or forgets the closing tag entirely — when that
+//    happens the match silently returns null, nothing gets parsed, and the
+//    raw "[PDF]# Report\n..." markup leaks straight into the visible chat
+//    bubble as literal text. This strips any opening action tag that has
+//    no matching close so the user at least sees clean prose instead of
+//    raw markup, and logs it so it's visible during development.
+const ACTION_TAG_NAMES = ["PDF", "PPT", "CHART", "PREVIEW", "IMAGE"];
+function stripUnclosedActionTags(text) {
+    for (const name of ACTION_TAG_NAMES) {
+        const openRe  = new RegExp(`\\[${name}\\]`, "i");
+        const closeRe = new RegExp(`\\[/${name}\\]`, "i");
+        if (openRe.test(text) && !closeRe.test(text)) {
+            console.warn(`⚠️ Unclosed [${name}] tag in model output — stripping raw markup from display.`);
+            text = text.replace(openRe, "").trim();
+        }
+    }
+    return text;
+}
+
 async function parseAndExecuteActions(rawText, mode = "live") {
-    let text      = rawText;
+    let text      = stripUnclosedActionTags(rawText);
     let indicator = null; // { type: "pdf"|"ppt"|"pdf-history"|"ppt-history"|"chart"|"preview"|"image-history", ...data }
 
     // [PDF]...[/PDF]
@@ -1449,12 +1493,67 @@ function clearAllFiles() {
 // 17. File Input Handler
 // ------------------------------------------
 
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+// ── Downscale an oversized IMAGE file client-side instead of rejecting it. ──
+//    A modern phone's main camera routinely produces 12MP+ JPEGs well past
+//    10MB; those used to be flat-out rejected with no path forward. This
+//    caps the long edge at 2200px and re-encodes as JPEG at quality 0.85 —
+//    comfortably enough resolution for vision/OCR while landing well under
+//    the limit for typical photos. Returns the original file unchanged if
+//    compression doesn't actually get it under the limit (e.g. an already
+//    very dense image) or if anything goes wrong, so the caller's existing
+//    size check still catches it.
+async function compressImageIfOversized(file) {
+    if (!file.type.startsWith("image/") || file.size <= MAX_ATTACHMENT_BYTES) return file;
+
+    try {
+        const objectUrl = URL.createObjectURL(file);
+        const img = await new Promise((resolve, reject) => {
+            const el = new Image();
+            el.onload  = () => resolve(el);
+            el.onerror = () => reject(new Error("Image load failed"));
+            el.src = objectUrl;
+        });
+
+        const MAX_EDGE = 2200;
+        let w = img.naturalWidth, h = img.naturalHeight;
+        if (Math.max(w, h) > MAX_EDGE) {
+            const scale = MAX_EDGE / Math.max(w, h);
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(objectUrl);
+
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", 0.85));
+        if (!blob || blob.size >= file.size) return file; // compression didn't help — let the size check handle it
+
+        const newName = file.name.replace(/\.\w+$/, "") + ".jpg";
+        return new File([blob], newName, { type: "image/jpeg", lastModified: Date.now() });
+    } catch (e) {
+        console.warn("Image compression failed, falling back to original file:", e.message);
+        return file;
+    }
+}
+
 // ── Shared helper: add files to selectedFiles with a given default
 //    imageMode. Called by Camera (photo), Photos (photo), and Files
 //    (document) — each entry point already knows the right intent,
 //    so no more forgetting to flip the Doc/Photo toggle after attaching. ──
-function addFilesWithMode(files, defaultImageMode = "document") {
-    const big = files.filter(f => f.size > 10 * 1024 * 1024);
+async function addFilesWithMode(files, defaultImageMode = "document") {
+    // Oversized images get a compression pass before the hard size check —
+    // oversized non-images (PDFs etc.) go straight to rejection as before.
+    const oversizedImages = files.filter(f => f.size > MAX_ATTACHMENT_BYTES && f.type.startsWith("image/"));
+    if (oversizedImages.length) showToast(`📉 Compressing ${oversizedImages.length > 1 ? "large photos" : "large photo"}...`);
+    files = await Promise.all(files.map(f =>
+        (f.size > MAX_ATTACHMENT_BYTES && f.type.startsWith("image/")) ? compressImageIfOversized(f) : f
+    ));
+
+    const big = files.filter(f => f.size > MAX_ATTACHMENT_BYTES);
     if (big.length) { showToast(`⚠️ Too large (max 10MB): ${big.map(f => f.name).join(", ")}`); return; }
 
     const existing = new Set(selectedFiles.map(i => i.file.name));
@@ -1537,11 +1636,43 @@ async function sendTextMessage(text) {
 // ------------------------------------------
 // 19. API Call
 // ------------------------------------------
+
+// ── Context window selection ──
+//    contextArray isn't uniformly "one meaningful turn per entry" — a few
+//    push sites add short breadcrumb notes (currently just the Bloom
+//    image-request marker) that carry almost no content for the model to
+//    reason over. A flat slice(-12) treats those the same as a real
+//    exchange, so a run of a few image generations mid-conversation could
+//    silently push real turns entirely out of the window.
+//    LOW_VALUE_CONTEXT_PATTERN flags those entries; getRecentContext()
+//    fills the window with real turns first and only backfills with
+//    low-value ones (in original order) if there's room left, so a
+//    breadcrumb note never displaces an actual exchange.
+const LOW_VALUE_CONTEXT_PATTERN = /^\[Bloom image request:/;
+
+function getRecentContext(contextArray, limit = 12) {
+    if (contextArray.length <= limit) return contextArray;
+
+    const meaningful = [];
+    const lowValue    = [];
+    for (const entry of contextArray) {
+        (LOW_VALUE_CONTEXT_PATTERN.test(entry.content) ? lowValue : meaningful).push(entry);
+    }
+
+    const recentMeaningful = meaningful.slice(-limit);
+    const remaining = limit - recentMeaningful.length;
+    const recentLowValue = remaining > 0 ? lowValue.slice(-remaining) : [];
+
+    // Re-sort by original position so the final message order is preserved
+    // (chat models expect chronological order, not "real turns then notes").
+    return contextArray.filter(e => recentMeaningful.includes(e) || recentLowValue.includes(e));
+}
+
 async function fetchReplyFor(contextArray) {
     const res  = await fetch("/api/ask", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ messages: contextArray.slice(-12), mood: currentMood, webSearch: webSearchOn })
+        body:    JSON.stringify({ messages: getRecentContext(contextArray), mood: currentMood, webSearch: webSearchOn })
     });
     const data = await res.json();
     return data.reply || "Hmm... kuch samajh nahi aaya 🤔";
@@ -1564,7 +1695,7 @@ async function streamReplyFor(contextArray, { onToken } = {}) {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
-            messages:  contextArray.slice(-12),
+            messages:  getRecentContext(contextArray),
             mood:      currentMood,
             webSearch: webSearchOn,
             stream:    true
@@ -2127,7 +2258,20 @@ function initSpeechRecognition() {
         micBtn.classList.remove("recording"); micIcon.className = "fa-solid fa-microphone";
         inputBox.placeholder = selectedFiles.length ? "Ask a question about these files (optional)..." : "Message Shanu AI...";
         const t = inputBox.value.trim();
-        if (t) setTimeout(() => handleSendAction(), 350);
+        if (!t) return;
+
+        // Auto-send after a short grace window so the user can see/edit
+        // the transcribed text (or cancel by typing/clearing it) before
+        // it goes out. Tracked in voiceAutoSendTimer so it can be
+        // cancelled, and re-checks `sending` at fire time — closes a
+        // race where a reply was already in flight when dictation ended.
+        clearTimeout(voiceAutoSendTimer);
+        voiceAutoSendTimer = setTimeout(() => {
+            voiceAutoSendTimer = null;
+            if (sending) return;
+            if (inputBox.value.trim() !== t) return; // user edited it — don't send stale text
+            handleSendAction();
+        }, 350);
     };
 
     recognition.onerror = e => {
@@ -2645,8 +2789,16 @@ async function initChat() {
     //    If Firestore has MORE messages than local (e.g. different device,
     //    or local cache was cleared), re-render the full authoritative set.
     try {
-        await initAuth();      // Trigger anonymous sign-in / resolve pending Google redirect
+        const { usingLocalGuestId } = await initAuth();   // Trigger anonymous sign-in / resolve pending Google redirect
         await waitForAuth();   // Block until auth state settles
+
+        // Anonymous auth failed and we're running on a local-only guest ID —
+        // history won't sync to another device/browser and won't survive a
+        // cache clear. Warn once per session instead of failing silently.
+        if (usingLocalGuestId && sessionStorage.getItem("shanu_guest_fallback_toast") !== "shown") {
+            sessionStorage.setItem("shanu_guest_fallback_toast", "shown");
+            showToast("⚠️ Couldn't connect your account — chats will only be saved on this device.");
+        }
 
         // Visible confirmation that a Google sign-in/link just completed —
         // useful on mobile where there's no easy way to check the console.
