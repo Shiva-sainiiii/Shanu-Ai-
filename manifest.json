@@ -1,0 +1,38 @@
+{
+  "name": "Shanu AI - Free AI Chatbot in Hindi & English",
+  "short_name": "Shanu AI",
+  "description": "Free mood-based AI chatbot with text-to-image generation, OCR, PDF/PPT export, charts, live HTML preview, and voice input.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#06080E",
+  "theme_color": "#00E5FF",
+  "lang": "en-IN",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

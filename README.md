@@ -11,6 +11,8 @@
 [![Cloudinary](https://img.shields.io/badge/Cloudinary-3448C5?style=flat-square&logo=cloudinary&logoColor=white)](https://cloudinary.com/)
 [![Vercel](https://img.shields.io/badge/Vercel-000000?style=flat-square&logo=vercel&logoColor=white)](https://vercel.com/)
 
+<img src="./favicon.png" alt="Shanu AI Logo" width="120" />
+
 **A premium, context-aware AI chatbot with Glassmorphism UI, mood-based personalities, AI image generation, and persistent chat history.**
 
 Developed with ❤️ by **[Shiva Saini](https://github.com/shiva-sainiiii)**
@@ -87,6 +89,11 @@ shanu-ai/
 ├── style.css           # Glassmorphism styling & animations
 ├── chat.js             # Core UI logic, message handling & Action Engine (PDF/PPT/Chart/Image/Preview)
 ├── firebase.js         # Firebase connection, Firestore helpers & LocalStorage backup layer
+├── manifest.json        # PWA web app manifest (installable, home-screen icon)
+├── favicon.ico          # Multi-size favicon (16/32/48/64/128/256)
+├── favicon.png          # 512×512 favicon
+├── apple-touch-icon.png # 180×180 icon for iOS home screen
+├── icons/                # 192×192 & 512×512 PWA manifest icons
 │
 └── api/
     ├── ask.js
@@ -183,6 +190,19 @@ Shanu AI uses a composite Firestore query that requires a manual index to be cre
 This project is part of the **Shanu AI Ecosystem**.
 
 > *"Shanu AI by Shiva Saini"* — Building smarter, moodier, more human conversations.
+
+The app icon is a neural-node chat bubble in Shanu AI's signature cyan glow (`#00E5FF`), matching the Glassmorphism UI theme — used across the favicon, iOS home-screen icon, and PWA install icon.
+
+---
+
+## 🔍 SEO & PWA
+
+- Full Open Graph + Twitter Card tags for rich link previews
+- JSON-LD `WebApplication` structured data for search engine rich results
+- `manifest.json` — installable as a standalone PWA on Android/desktop, with proper themed icons
+- `theme-color` meta tag matches the app's dark background for a native-feeling browser chrome
+- `sitemap.xml` + `robots.txt` for search engine crawling
+- Canonical URL set to avoid duplicate-content indexing
 
 ---
 
